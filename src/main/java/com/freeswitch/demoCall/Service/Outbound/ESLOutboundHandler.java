@@ -33,16 +33,7 @@ public class ESLOutboundHandler extends AbstractOutboundClientHandler {
 
     @Override
     protected void handleConnectResponse(ChannelHandlerContext ctx, EslEvent event) {
-        logger.info(event.getEventHeaders().get("Answer-State"));
-        if (event.getEventName().equalsIgnoreCase("CHANNEL_DATA")) {
-            if ("ringing".equalsIgnoreCase(event.getEventHeaders().get("Answer-State")) ||
-                    event.getEventHeaders().get("variable_conference_uuid") != null) {
-                doBridgeCall(ctx, event);
-            }
-        } else {
-            logger.warn("Unexpected event after connect: [" + event.getEventName() + ']');
-        }
-//        printLog(event);
+        logger.info(event.getEventHeaders());
     }
 
     @Override
@@ -71,6 +62,7 @@ public class ESLOutboundHandler extends AbstractOutboundClientHandler {
     private void doBridgeCall(ChannelHandlerContext ctx, EslEvent event) {
 
 //        Configuration cfg = AppContext.getInstance().getContext().getBean(Configuration.class);
+        logger.info(event.getEventHeaders());
         String caller = event.getEventHeaders().get("Channel-ANI");
         String callee = event.getEventHeaders().get("Channel-Destination-Number");
         String uniqueID = event.getEventHeaders().get("Unique-ID");

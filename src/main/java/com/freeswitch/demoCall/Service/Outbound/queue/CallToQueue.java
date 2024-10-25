@@ -32,9 +32,9 @@ public class CallToQueue {
         logger.info("{}list Agent before filter: {}", prefixLog, list);
         if (caller.equals("1001")) {
             if (inboudClient != null) {
-                handleCallToConference(inboudClient, eslEvent, null, callId, caller, list);
+                handleCallToConference(inboudClient, eslEvent, null, callId);
             } else {
-                handleCallToConference(null, null, ctx, callId, caller, list);
+                handleCallToConference(null, null, ctx, callId);
             }
         }
     }
@@ -43,15 +43,15 @@ public class CallToQueue {
         logger.info("{}bridgeToCall", prefixLog);
         if (caller.equals("1001")) {
             if (inboudClient != null) {
-                handleBridgeToCall(inboudClient, eslEvent, null, caller);
+                handleBridgeToCall(inboudClient, eslEvent, null);
             } else {
-                handleBridgeToCall(null, null, ctx, caller);
+                handleBridgeToCall(null, null, ctx);
             }
         }
     }
 
     private void handleBridgeToCall(Client inboudClient, EslEvent eslEvent,
-                                        ChannelHandlerContext ctx, String caller) {
+                                        ChannelHandlerContext ctx) {
         if (inboudClient != null) {
             sendMsgCommand(inboudClient, eslEvent, "execute",
                     "set", "record_sample_rate=8000", true);

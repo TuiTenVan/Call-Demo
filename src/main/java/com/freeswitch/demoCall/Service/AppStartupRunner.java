@@ -67,7 +67,7 @@ public class AppStartupRunner implements ApplicationRunner {
         });
 
         try {
-            final InetSocketAddress socketAddress = new InetSocketAddress(8086); // (7)
+            final InetSocketAddress socketAddress = new InetSocketAddress(8092); // (7)
             final ChannelFuture f = b.bind(socketAddress).sync(); // (8)
             f.channel().closeFuture().await();
             logger.info("startSipUASListener|success");

@@ -68,6 +68,7 @@ public class ESLInboundHandler {
                     switch (eventName) {
                         case "DTMF":
                             handleDtmfAction(event);
+                            printLog(event);
                             break;
                         case "CHANNEL_ANSWER":
                             handleChannelAnswer(event);
@@ -204,12 +205,10 @@ public class ESLInboundHandler {
 //}
     public void musicOnHold(String callId, String caller) {
         EslMessage list = inboundClient.sendSyncApiCommand("conference", callId + "list");
-        logger.info(list.getBodyLines());
         if (list.getBodyLines().size() == 1 && list.getBodyLines().get(0).equals("-ERR Conference " + callId + " not found")) {
             throw new InvalidParameterException("transferCall callId not true");
         }
         EslMessage listUuid = inboundClient.sendSyncApiCommand("show", "channels like" + callId);
-        logger.info(listUuid.getBodyLines());
         if (!listUuid.getBodyLines().isEmpty()) {
             String uuidCaller = listUuid.getBodyLines().get(1).split(",")[0];
             String holdFlag = inboundClient.sendSyncApiCommand("uuid_getvar", uuidCaller + " hold_flag").getBodyLines().get(0);
