@@ -1,7 +1,8 @@
-package com.freeswitch.demoCall.service.outbound;
+package com.freeswitch.demoCall.service.callin;
 
-import com.freeswitch.demoCall.service.outbound.queue.CallToQueue;
-import com.freeswitch.demoCall.service.outbound.queue.RedisQueueService;
+import com.freeswitch.demoCall.service.callin.queue.CallToQueueServiceV2;
+import com.freeswitch.demoCall.service.callin.queue.RedisQueueService;
+import com.freeswitch.demoCall.service.callin.queue.processv2.RedisQueueSessionService;
 import lombok.Getter;
 import lombok.NoArgsConstructor;
 import lombok.Setter;
@@ -24,12 +25,14 @@ public class ESLOutboundHandler extends AbstractOutboundClientHandler {
 
     private final Logger logger = LogManager.getLogger(ESLOutboundHandler.class);
     private ApplicationContext context;
-    private CallToQueue callToQueue;
+    private CallToQueueServiceV2 callToQueue;
     private RedisQueueService redisQueueService;
+    private RedisQueueSessionService redisQueueSessionService;
 
     public ESLOutboundHandler(ApplicationContext context) {
         this.redisQueueService = context.getBean(RedisQueueService.class);
-        this.callToQueue = context.getBean(CallToQueue.class);
+        this.callToQueue = context.getBean(CallToQueueServiceV2.class);
+        this.redisQueueSessionService = context.getBean(RedisQueueSessionService.class);
     }
 
     @Override
@@ -76,6 +79,6 @@ public class ESLOutboundHandler extends AbstractOutboundClientHandler {
                 caller + "|" +
                 callee + "|";
         EventSocketAPI.runCommand(ctx, "answer", null, false);
-        redisQueueService.setCallIdIvrByCaller(caller, sipCallId);
+        redisQueueSessionService.setCallIdIvrByCaller(caller, sipCallId);
     }
 }

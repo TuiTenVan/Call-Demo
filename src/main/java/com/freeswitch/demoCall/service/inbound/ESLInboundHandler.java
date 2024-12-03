@@ -1,7 +1,10 @@
 package com.freeswitch.demoCall.service.inbound;
 
 
-import com.freeswitch.demoCall.service.outbound.queue.CallToQueue;
+import com.freeswitch.demoCall.config.Configuration;
+import com.freeswitch.demoCall.service.callin.queue.CallToQueueServiceV2;
+import com.freeswitch.demoCall.service.callin.queue.processv2.RedisQueueSessionService;
+import com.freeswitch.demoCall.utils.Utils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.freeswitch.esl.client.IEslEventListener;
@@ -17,16 +20,21 @@ import java.text.SimpleDateFormat;
 import java.util.Date;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.Objects;
 
 public class ESLInboundHandler {
 
     private final Logger logger = LogManager.getLogger(ESLInboundHandler.class);
     private Client inboundClient;
     private String firstCallId = null;
-    private CallToQueue callToQueue;
+    private CallToQueueServiceV2 callToQueue;
+    private final Configuration configuration;
+    private RedisQueueSessionService redisQueueSessionService;
 
     public ESLInboundHandler(String ip, ApplicationContext context) {
-        this.callToQueue = context.getBean(CallToQueue.class);
+        this.callToQueue = context.getBean(CallToQueueServiceV2.class);
+        this.configuration = context.getBean(Configuration.class);
+        this.redisQueueSessionService = context.getBean(RedisQueueSessionService.class);
         try {
             inboundClient = new Client();
             startEslInboundListener(inboundClient);
@@ -108,47 +116,64 @@ public class ESLInboundHandler {
             logger.info("DTMF 2 pressed");
         }
     }
-
     public void transferCall(String callId, String caller, String oldCallee, String newCallee, int type) {
+
+        if (oldCallee.endsWith("@" + configuration.getDomainXmpp())) {
+            oldCallee = oldCallee.replace("@" + configuration.getDomainXmpp(), "");
+            logger.info("transferCall|replace oldCallee to {}", oldCallee);
+        }
+        if (newCallee.endsWith("@" + configuration.getDomainXmpp())) {
+            newCallee = newCallee.replace("@" + configuration.getDomainXmpp(), "");
+            logger.info("transferCall|replace newCallee to {}", newCallee);
+        }
+        String originCallId = redisQueueSessionService.getCallIdIvrByCaller(caller);
+        if (originCallId == null) {
+            throw new InvalidParameterException("transferCall callId not true | originCallId is null");
+
+        } else if (!Objects.equals(originCallId, callId)) {
+            logger.info("callId not equal originCallId by caller|originCallId={}", originCallId);
+            callId = originCallId;
+        }
         EslMessage list = inboundClient.sendSyncApiCommand( "conference",
-                 " list");
+                callId + " list");
         logger.info(list.getBodyLines());
         if (list.getBodyLines().size() == 1 && list.getBodyLines().get(0).equals("-ERR Conference " + callId + " not found")) {
 
-            throw new InvalidParameterException("transferCall callId not true"); // TODO
+            throw new InvalidParameterException("transferCall callId not found");
         }
-        if(type == 5){ // 5 = interrupt
-            String command = "ringmeconf hup all";
+        if(type == 7){ // 7 = interrupt
+            String command = callId + " hup all";
             logger.info("transferCall|type={}|conference {}| caller {}| callee {}", type, command, caller, oldCallee);
             inboundClient.sendAsyncApiCommand( "conference", command);
-        }
-        else if (type == 1 || type == 2 || type == 3 || type == 4) { // 1 = transfer , 2 = rob, 3 = nghe len, 4 = join, 5 = hangup
-            String confIdKick = "last";
-            if ((type != 3 && type != 4) && !list.getBodyLines().isEmpty()) {
-                for (String bodyLine : list.getBodyLines()) {
-                    if (bodyLine.contains(oldCallee)) {
-                        confIdKick = bodyLine.split(";")[0];
-                        break;
+
+        } else if (type == 1 || type == 2 || type == 6) {
+
+            // 1 = transfer , 2 = rob, 3 = nghe len, 6 = join
+            String fsGw = "{media_webrtc=true,sip_cid_type=rpid,ringme_type_transfer=" + type + ",ringme_call_id=" + callId;
+            if (type == 1 || type == 2) { // transfer and rob
+                String confIdKick = "last";
+                if (!list.getBodyLines().isEmpty()) {
+                    for (String bodyLine : list.getBodyLines()) {
+                        if (bodyLine.contains(oldCallee)) {
+                            confIdKick = bodyLine.split(";")[0];
+                            break;
+                        }
                     }
                 }
-            }
-
-            String fsGw = "{ringme_type_transfer=" + type + ",ringme_call_id=" + callId;
-            if (type != 3 && type != 4) {
                 fsGw = fsGw + ",api_on_answer='sched_api +1 none conference " + callId + " hup " + confIdKick + "'";
-            } else if (type == 3){
-                fsGw = fsGw + ",api_on_answer='conference " + callId + " mute last'";
-            } else{
-                fsGw = fsGw + ",api_on_answer='conference ringmeconf";
+//            } else if (type == 3){ // nghe len
+//                fsGw = fsGw + ",api_on_answer='sched_api +1 none conference " + callId + " mute last'";
+            } else { // join
+                fsGw = fsGw + ",api_on_answer='conference " + callId + "'";
             }
-            fsGw = fsGw + "}user/";
+            fsGw = fsGw + "}sofia/gateway/ringme_callin_vannv/";
 
-            String command =  "ringmeconf dial " +
-                    fsGw  + newCallee + (type == 2 ? "_rob" : "");
+            String command = callId + " bgdial " +
+                    fsGw + "queue_" + newCallee + (type != 1 ? "_rob" : "") + " " + caller;
 
             logger.info("transferCall|type={}|conference {}", type, command);
             inboundClient.sendAsyncApiCommand( "conference", command);
-        } else { // transfer to hotline
+        } else if (type == 3) {
             String uuidCaller = null;
             if (!list.getBodyLines().isEmpty()) {
                 for (String bodyLine : list.getBodyLines()) {
@@ -158,13 +183,43 @@ public class ESLInboundHandler {
                     }
                 }
             }
-            logger.info("transferCall|type={}| uuid_transfer {} {}", type, uuidCaller, newCallee);
+            String fsGw2 = "{origination_caller_id_number=" + caller + ",call_timeout=15,hangup_after_bridge=true," +
+                    "media_webrtc=true,sip_cid_type=rpid,ringme_type_transfer=" + type +
+                    ",ringme_call_id=" + callId + "}sofia/gateway/ringme_callin/";
+            //    String conference = " &conference(" + callId + "++flags{mute|ghost|join-only})";
+            String eavesdrop = " &eavesdrop(" + uuidCaller + ")";
+            String disableVideo = " &uuid_media off " + uuidCaller;
+            String command = fsGw2 + "queue_" + newCallee + "_rob" + eavesdrop + disableVideo;
+            logger.info("transferCall|type={}|originate {}", type, command);
+            inboundClient.sendAsyncApiCommand("originate", command);
+    } else { // 4 = ivr menu, 5 = queue
+            String uuidCaller = null;
+            if (!list.getBodyLines().isEmpty()) {
+                for (String bodyLine : list.getBodyLines()) {
+                    if (bodyLine.contains(caller)) {
+                        uuidCaller = bodyLine.split(";")[2];
+                        break;
+                    }
+                }
+            }
+            String destination = (type == 4 ? "ivr_" : "queue_") + newCallee;
+            logger.info("transferCall|type={}| uuid_transfer {} {}", type, uuidCaller,  destination);
             inboundClient.sendAsyncApiCommand( "uuid_transfer",
-                    uuidCaller + " " + newCallee);
+                    uuidCaller + " " + destination);
+
         }
     }
 
     public void musicOnHold(String callId, String caller) {
+        String originCallId = redisQueueSessionService.getCallIdIvrByCaller(caller);
+        if (originCallId == null) {
+            throw new InvalidParameterException("musicOnHold callId not true | originCallId is null");
+
+        } else if (!Objects.equals(originCallId, callId)) {
+            logger.info("callId not equal originCallId by caller|originCallId={}", originCallId);
+            callId = originCallId;
+        }
+
         EslMessage list = inboundClient.sendSyncApiCommand("conference", callId + " list");
         logger.info(String.join("\n", list.getBodyLines()));
         if (list.getBodyLines().size() == 1 && list.getBodyLines().get(0).equals("-ERR Conference " + callId + " not found")) {
@@ -182,41 +237,39 @@ public class ESLInboundHandler {
             }
             String holdFlag = inboundClient.sendSyncApiCommand("uuid_getvar", uuidCaller + " hold_flag").getBodyLines().get(0);
             logger.info("Hold flag: {}", holdFlag);
+
+            String linkAudio = Utils.getLink("/version-huyen/cms-sdk-upload/ivrFile/2024/10/18/1jfxnkuwjwidduehl4p186ont79dirfq.wav", true);
+            String linkVideo = "/etc/freeswitch/call-record/sounds/h70kszksmkorxlkw5r0n31zbnma1f0zu.mp4";
+
+            logger.info("linkAudio hold call: {}", linkAudio);
+            logger.info("linkAudio hold call video: {}", linkVideo);
             if (!holdFlag.equals("true")) {
-                inboundClient.sendSyncApiCommand("uuid_displace", uuidCaller + " start /etc/freeswitch/call-record/sounds/holdcall.wav 0 loop");
-                logger.info("Start music on hold | callId: {} | caller: {}", callId, caller);
                 inboundClient.sendSyncApiCommand("uuid_setvar", uuidCaller + " hold_flag true");
+
+                if (!redisQueueSessionService.getCacheVideoCallBySessionId(callId)) {
+
+                    inboundClient.sendSyncApiCommand("uuid_displace", uuidCaller + " start " + linkAudio + " 0 loop");
+                    logger.info("Start music on hold | callId: {} | caller: {}", callId, caller);
+                } else {
+
+                    inboundClient.sendSyncApiCommand("uuid_broadcast", uuidCaller + " " + linkVideo + " aleg");
+                    logger.info("Start music on hold videocall | callId: {} | caller: {}", callId, caller);
+                }
             } else {
-                inboundClient.sendSyncApiCommand("uuid_displace", uuidCaller + " stop /etc/freeswitch/call-record/sounds/holdcall.wav");
-                logger.info("Stop music on hold | callId: {} | caller: {}", callId, caller);
                 inboundClient.sendSyncApiCommand("uuid_setvar", uuidCaller + " hold_flag false");
+
+                if (!redisQueueSessionService.getCacheVideoCallBySessionId(callId)) {
+
+                    inboundClient.sendSyncApiCommand("uuid_displace", uuidCaller + " stop " + linkAudio);
+                    logger.info("Stop music on hold | callId: {} | caller: {}", callId, caller);
+                } else {
+
+                    inboundClient.sendSyncApiCommand("uuid_break", uuidCaller);
+                    logger.info("Stop music on hold videocall | callId: {} | caller: {}", callId, caller);
+                }
             }
         }
     }
-
-//    public void musicOnHold(String callId, String caller) {
-//        EslMessage list = inboundClient.sendSyncApiCommand("conference", callId + "list");
-//        if (list.getBodyLines().size() == 1 && list.getBodyLines().get(0).equals("-ERR Conference " + callId + " not found")) {
-//            throw new InvalidParameterException("transferCall callId not true");
-//        }
-//        EslMessage listUuid = inboundClient.sendSyncApiCommand("show", "channels like" + callId);
-//        if (!listUuid.getBodyLines().isEmpty()) {
-//            String uuidCaller = listUuid.getBodyLines().get(1).split(",")[0];
-//            String holdFlag = inboundClient.sendSyncApiCommand("uuid_getvar", uuidCaller + " hold_flag").getBodyLines().get(0);
-//            logger.info("Hold flag: {}", holdFlag);
-//            if (!holdFlag.equals("true")) {
-//                inboundClient.sendSyncApiCommand("uuid_displace", uuidCaller + " start /etc/freeswitch/call-record/sounds/holdcall.wav 0 loop");
-//                logger.info("Start music on hold | callId: {} | caller: {}", callId, caller);
-//                inboundClient.sendSyncApiCommand("uuid_setvar", uuidCaller + " hold_flag true");
-//            } else {
-//                inboundClient.sendSyncApiCommand("uuid_displace", uuidCaller + " stop /etc/freeswitch/call-record/sounds/holdcall.wav");
-//                logger.info("Stop music on hold | callId: {} | caller: {}", callId, caller);
-//                inboundClient.sendSyncApiCommand("uuid_setvar", uuidCaller + " hold_flag false");
-//            }
-//        } else {
-//            throw new InvalidParameterException("No active channels found");
-//        }
-//    }
 
 
     private long getSetUpDurationForAnswer(Map<String, String> eventHeaders) {

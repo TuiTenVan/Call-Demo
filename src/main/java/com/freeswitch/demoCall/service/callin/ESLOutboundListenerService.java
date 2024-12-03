@@ -1,4 +1,4 @@
-package com.freeswitch.demoCall.service.outbound;
+package com.freeswitch.demoCall.service.callin;
 
 import org.freeswitch.esl.client.internal.debug.ExecutionHandler;
 import org.freeswitch.esl.client.outbound.AbstractOutboundClientHandler;

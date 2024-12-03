@@ -1,7 +1,7 @@
 package com.freeswitch.demoCall.service;
 
-import com.freeswitch.demoCall.service.outbound.ESLOutboundListenerService;
-import com.freeswitch.demoCall.service.outbound.SipProxy;
+import com.freeswitch.demoCall.service.callin.ESLOutboundListenerService;
+import com.freeswitch.demoCall.service.callin.SipProxy;
 import io.netty.bootstrap.Bootstrap;
 import io.netty.channel.*;
 import io.netty.channel.nio.NioEventLoopGroup;

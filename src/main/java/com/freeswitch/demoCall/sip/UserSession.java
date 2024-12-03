@@ -34,4 +34,6 @@ public class UserSession {
     private String sipWebsocketId;
 
     private long timeRemain;
+
+    private boolean isIvr;
 }

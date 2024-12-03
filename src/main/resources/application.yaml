@@ -9,3 +9,10 @@ ringme:
         max-active: 8
         max-wait: 1ms
       shutdown-timeout: 100ms
+  kafka:
+    address: localhost:9093
+    topic:
+      webrtc2pstn: call_webrtc2pstn
+      pstn2webrtc: xmpp_backend2client
+    group:
+      webrtc2pstn: webrtc-sip-gw

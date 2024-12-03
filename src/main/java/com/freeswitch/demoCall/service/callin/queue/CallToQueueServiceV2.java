@@ -1,6 +1,7 @@
-package com.freeswitch.demoCall.service.outbound.queue;
+package com.freeswitch.demoCall.service.callin.queue;
 
-import com.freeswitch.demoCall.service.outbound.EventSocketAPI;
+import com.freeswitch.demoCall.service.callin.EventSocketAPI;
+import com.freeswitch.demoCall.service.callin.queue.processv2.RedisQueueSessionService;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.freeswitch.esl.client.inbound.Client;
@@ -16,14 +17,17 @@ import java.util.List;
 
 
 @Service
-public class CallToQueue {
-    private static final Logger logger = LogManager.getLogger(CallToQueue.class);
+public class CallToQueueServiceV2 {
+    private static final Logger logger = LogManager.getLogger(CallToQueueServiceV2.class);
 
     @Autowired
     private RedisQueueService redisQueueService;
 
+    @Autowired
+    private RedisQueueSessionService redisQueueSessionService;
+
     public void handleBridgeQueueAction(Client inboudClient, EslEvent eslEvent, String prefixLog, String callId, String caller) {
-        String originCallId = redisQueueService.getCallIdIvrByCaller(caller);
+        String originCallId = redisQueueSessionService.getCallIdIvrByCaller(caller);
         if(originCallId != null) {
             handleCallQueue(prefixLog, originCallId, caller,
                     inboudClient, eslEvent, null);
@@ -31,7 +35,7 @@ public class CallToQueue {
 
     }
     public void handleBridgeToCall(Client inboudClient, EslEvent eslEvent, String prefixLog, String caller) {
-        String originCallId = redisQueueService.getCallIdIvrByCaller(caller);
+        String originCallId = redisQueueSessionService.getCallIdIvrByCaller(caller);
         if(originCallId != null) {
             bridgeToCall(prefixLog, caller, inboudClient, eslEvent, null);
         }

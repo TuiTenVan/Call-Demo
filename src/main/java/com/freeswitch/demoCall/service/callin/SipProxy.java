@@ -1,9 +1,20 @@
-package com.freeswitch.demoCall.service.outbound;
-
+package com.freeswitch.demoCall.service.callin;
 
 import com.freeswitch.demoCall.entity.UA;
+import com.freeswitch.demoCall.mysql.dao.CallCDRDao;
+import com.freeswitch.demoCall.mysql.dao.UserInfoDao;
+import com.freeswitch.demoCall.mysql.entity.CallCDR;
+import com.freeswitch.demoCall.mysql.entity.UserInfo;
+import com.freeswitch.demoCall.service.CallService;
+import com.freeswitch.demoCall.service.RedisService;
+import com.freeswitch.demoCall.service.callin.queue.CallQueueNotifyService;
+import com.freeswitch.demoCall.service.callin.queue.RedisQueueService;
+import com.freeswitch.demoCall.service.callin.queue.processv2.RedisQueueSessionService;
 import com.freeswitch.demoCall.service.processor.CallInMgr;
 import com.freeswitch.demoCall.utils.SipUtil;
+import com.google.gson.Gson;
+import com.google.gson.JsonObject;
+
 import io.pkts.buffer.Buffers;
 import io.pkts.packet.sip.SipMessage;
 import io.pkts.packet.sip.SipRequest;
@@ -11,14 +22,14 @@ import io.pkts.packet.sip.SipResponse;
 import io.sipstack.netty.codec.sip.SipMessageEvent;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
-
-
 import org.jivesoftware.smack.packet.Message;
 import org.jivesoftware.smack.packet.MessageBuilder;
 import org.jivesoftware.smack.packet.StandardExtensionElement;
 import org.jivesoftware.smack.util.XmlStringBuilder;
 import org.jxmpp.stringprep.XmppStringprepException;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.kafka.core.KafkaTemplate;
 import org.springframework.stereotype.Service;
 
 import java.util.*;
@@ -36,7 +47,32 @@ public class SipProxy {
     @Value("${ringme.domain.xmpp}")
     private String domainXmpp;
 
+    @Value("${ringme.kafka.topic.pstn2webrtc}")
+    private String kafka_topic;
 
+    @Autowired
+    private KafkaTemplate<String, String> kafkaTemplate;
+
+    @Autowired
+    private UserInfoDao userInfoDao;
+
+    @Autowired
+    private RedisService redisService;
+
+    @Autowired
+    private RedisQueueService redisQueueService;
+
+    @Autowired
+    private RedisQueueSessionService redisQueueSessionService;
+
+    @Autowired
+    private CallService callService;
+
+    @Autowired
+    private CallQueueNotifyService callQueueNotifyService;
+
+    @Autowired
+    private Gson gson;
 
     public static void send(SipMessageEvent sipEvent, SipMessage rq) {
         if (sipEvent != null && rq != null) {
@@ -47,7 +83,7 @@ public class SipProxy {
                 String callID = SipUtil.getCallID(rq);
                 String method = rq.getMethod().toString();
                 String initialLine = rq.getInitialLine().toString();
-                logger.info("{},{},{},{},{},{}", true, method, caller, callee, callID, initialLine);
+                logger.info("send SipMessage to FS: {},{},{},{},{},{}", true, method, caller, callee, callID, initialLine);
             }
 
         }
@@ -86,31 +122,122 @@ public class SipProxy {
         String caller = SipUtil.getFromUser(req);
         String callee = SipUtil.getToUser(req);
         String callID = SipUtil.getCallID(req);
-//        handleBridge(event, caller, callee, callID);
+
+        if (!CallInMgr.instance().containsKey(callID)) {
+
+            if (callee.startsWith("queue_")) {
+
+                handleCallIvr(event, caller, callee, callID);
+                return;
+            }
+            Map<String, String> map = redisService.getRecentCalleeForCallin(caller, true);
+
+            if (map == null) {
+                // response cancel
+                final SipMessage msg = event.getMessage();
+                final SipResponse response = msg.createResponse(486);
+                SipProxy.send(event, response);
+                logger.info("CALLIN|BRIDGE CALL FAIL|RECENT CALL NOT EXIST");
+            } else {
+
+                final String PREFIX_LOG_CALLIN = "CALLIN|" + caller + "|" + map.get("callee") + "|" + callID + "|";
+
+                logger.info(PREFIX_LOG_CALLIN + "HOTLINE=" + callee + "|jid=" + map.get("jid"));
+                UA ua = new UA(event);
+                ua.setCallee(map.get("callee"));
+                ua.setJid(map.get("jid"));
+                ua.setCallerName(map.get("calleeName"));
+
+                String additionaldata = map.get("additionaldata") != null ? map.get("additionaldata") : null;
+                if (additionaldata != null) {
+                    ua.setAdditionaldata(additionaldata);
+                }
+                // cancel callin if client offline not working true callid
+                redisService.putRecentCallinCallId(caller, callID);
+
+//                redisService.putCDRInviteCallinToRedis(map.get("callee"), callID,  map.get("jid"), event);
+//                ua.setNumOfOwner(numOfOwner);
+                CallInMgr.instance().put(ua);
+
+                logger.info(PREFIX_LOG_CALLIN + "PUT UA");
+
+                UserInfo userInfo = userInfoDao.getUserInfoByUsername(ua.getJid().split("@")[0]);
+                logger.info(PREFIX_LOG_CALLIN + "USER_INFO|{}", userInfo);
+                CallCDR callCDR = CallCDR.builder()
+                        .sessionId(callID)
+                        .calleeUsername(ua.getJid().split("@")[0])
+                        .callerPhoneNumber(caller)
+                        .calleePhoneNumber(ua.getCallee())
+                        .calleeIdDepartment(userInfo.getIdDepartment())
+                        .calleeIdProvince(userInfo.getIdProvince())
+                        .calleeAppId(userInfo.getAppId())
+                        .calleeType(userInfo.getType())
+                        .calleePosition(userInfo.getPosition())
+                        .callType("callin")
+                        .hotline(callee)
+                        .callStatus("invite")
+                        .createdAt(new Date())
+                        .ownerId(userInfo.getOwnerId())
+                        .build();
+
+
+                callCDR.setNetworkType(callCDR.getMnpFrom().equals(callCDR.getMnpTo()) ? "on-net" : "off-net");
+
+                if (map.get("order") != null) {
+                    callCDR.setOrderId(map.get("order"));
+                }
+                if (additionaldata != null) {
+                    callCDR.setAdditionalData(additionaldata);
+                }
+
+                Message message = makeXmppMessageCallinInvite(caller,
+                        ua.getCallerName(), null,
+                        ua.getCallee(), ua.getJid(), getSdp(event, null),
+                        callID, additionaldata, false, false);
+                pushRedisNotify(ua.getJid(), callID, "100", message);
+                sendMessage(message);
+                logger.info(PREFIX_LOG_CALLIN + "SEND INVITE CALLIN MESSAGE TO XMPP");
+            }
+        }
     }
 
-    private void handleBridge(SipMessageEvent event, String caller, String callee, String callID) {
-        final String PREFIX_LOG_CALLIN = "BRIDGE_CALL|" + caller + "|" + callee + "|" + callID + "|";
-        logger.info("{}START", PREFIX_LOG_CALLIN);
+    private void handleCallIvr(SipMessageEvent event, String caller, String callee, String callID) {
+        final String PREFIX_LOG_CALLIN = "CALL_IVR|" + caller + "|" + callee + "|" + callID + "|";
+        logger.info(PREFIX_LOG_CALLIN + "START");
 
-//        UserInfo userInfo = userInfoDao.getUserInfoByUsername(callee);
-//        logger.info("{}{}: {}", PREFIX_LOG_CALLIN, callee, userInfo);
+        if (callee.equals("queue_ringing")) {
+            SipResponse response = event.getMessage().createResponse(180);
+            SipProxy.send(event, response);
+            return;
+        }
+        String usernameCallee = callee.replace("queue_", "").replace("_rob", "");
+        UserInfo userInfo = userInfoDao.getUserInfoByUsername(usernameCallee);
+        logger.info(PREFIX_LOG_CALLIN + "{}: {}", usernameCallee, userInfo);
+
+
+        String originCallId = redisQueueSessionService.getCallIdIvrByCaller(caller);
 
         UA ua = new UA(event);
-//        ua.setIvr(true);
+        ua.setIvr(!callee.contains("_rob"));
         ua.setCaller(caller);
-        ua.setCallee("+84911111121");
-        ua.setJid(callee + "@192.168.1.78");
+        ua.setCallee(userInfo.getPhoneNumber());
+        ua.setJid(userInfo.getUsername() + "@" + userInfo.getDomain());
         CallInMgr.instance().put(ua);
 
+        callService.cacheAgentInfoForCallId(originCallId, userInfo);
+        redisQueueService.cacheAgentCalling(ua.getCallee());
 
-        Message message = makeXmppMessageCallinInvitte(caller,
-                ua.getCallerName(),
-                ua.getCallee(), ua.getJid(), getSdp(event),
-                callID, null, false);
+        boolean isAppToApp = event.getMessage().getHeader("P-Early-Media") == null;
+
+        String additionaldata = redisQueueSessionService.getCallOrderIvrByCaller(caller);
+
+        Message message = makeXmppMessageCallinInvite(caller,
+                ua.getCallerName(), originCallId,
+                ua.getCallee(), ua.getJid(), getSdp(event, originCallId),
+                callID, additionaldata, isAppToApp, callee.contains("_rob"));
 
         sendMessage(message);
-        logger.info("{}SEND INVITE MESSAGE TO XMPP", PREFIX_LOG_CALLIN);
+        logger.info(PREFIX_LOG_CALLIN + "SEND INVITE MESSAGE TO XMPP");
     }
 
     private void onReceiveCancel(SipMessageEvent event) {
@@ -123,7 +250,19 @@ public class SipProxy {
         String callID = SipUtil.getCallID(req);
 //        String reason = SipUtil.getReason(req);
 
+        UA ua = CallInMgr.instance().remove(callID);
+        if (ua != null) {
+            final String PREFIX_LOG_CALLIN = "CALLIN|" + caller + "|" + ua.getCallee() + "|" + callID + "|";
 
+            Message message = makeXmppMessageCallin(caller, ua.getCallerName(), ua.getCallee(), ua.getJid(), "486",
+                    SipUtil.getCallID(event.getMessage()), ua.getAdditionaldata());
+
+            pushRedisNotify(ua.getJid(), callID, "486", message);
+            sendMessage(message);
+            logger.info(PREFIX_LOG_CALLIN + "SEND CANCEL 486 CALLIN MESSAGE TO XMPP");
+
+            redisQueueService.removeCacheAgentCalling(ua.getCallee());
+        }
     }
 
     private void onReceiveBye(SipMessageEvent event) {
@@ -147,32 +286,43 @@ public class SipProxy {
 
             if (ua.isIvr()) {
 //                redisQueueService.cacheAgentAfterHangup(ua.getJid(), 60, ua.getCaller());
+                callQueueNotifyService.stopNotifyAnswerTimeout(caller, null);
             }
+            redisQueueService.removeCacheAgentCalling(ua.getCallee());
         }
     }
 
     public void sendMessage(Message message) {
         try {
+//            Stanza xmlString  = (Stanza) PacketParserUtils.getParserFor(String.valueOf(message));
             XmlStringBuilder stringBuilder = (XmlStringBuilder) message.toXML();
-//            kafkaTemplate.send(kafka_topic, stringBuilder.toString());
+            kafkaTemplate.send(kafka_topic, stringBuilder.toString());
             logger.info("push2Queue|Message|" + stringBuilder);
         } catch (Exception e) {
             logger.error("push2Queue|Exception|" + e.getMessage(), e);
         }
     }
 
-    private String getSdp(SipMessageEvent event) {
-        return event.getMessage().getRawContent().toString();
+    private String getSdp(SipMessageEvent event, String originCallId) {
+        String sdp = event.getMessage().getRawContent().toString();
+        if (sdp.contains("m=video ") && originCallId != null) {
+            if (!redisQueueSessionService.getCacheVideoCallBySessionId(originCallId)) {
+                sdp = sdp.split("m=video ")[0];
+            }
+        }
+        return sdp;
     }
 
-    public Message makeXmppMessageCallinInvitte(String caller,
-                                                String callerName,
-                                                String callee,
-                                                String to,
-                                                String sdp,
-                                                String callID,
-                                                String additionaldata,
-                                                boolean isAppToApp) {
+    public Message makeXmppMessageCallinInvite(String caller,
+                                               String callerName,
+                                               String originCallId,
+                                               String callee,
+                                               String to,
+                                               String sdp,
+                                               String callID,
+                                               String additionaldata,
+                                               boolean isAppToApp,
+                                               boolean isRob) {
         Message message;
         try {
             message = MessageBuilder.buildMessage(UUID.randomUUID().toString())
@@ -193,6 +343,7 @@ public class SipProxy {
             StandardExtensionElement extData = StandardExtensionElement.builder(
                             "data", "urn:xmpp:ringme:data")
                     .addAttribute("code", "100")
+                    .addAttribute("originCallId", originCallId)
                     .setText(sdp)
                     .build();
 
@@ -209,11 +360,34 @@ public class SipProxy {
                     .addElement("session", callID);
 
             if (additionaldata != null) {
-                extCalldataBuilder.addElement("additionaldata", additionaldata);
+
+                if (originCallId != null) {
+
+                    JsonObject jsonObject = gson.fromJson(additionaldata, JsonObject.class);
+
+                    CallCDR callCDR = redisQueueSessionService.getCacheCallCdrBySessionId(originCallId);
+
+                    if (callCDR != null) {
+
+                        jsonObject.addProperty("appId", callCDR.getCallerAppId());
+                    }
+                    Map<String, Object> queueInfo = redisQueueSessionService.getIvrQueueByCallId(originCallId);
+                    if (!queueInfo.isEmpty()) {
+
+                        jsonObject.addProperty("queueName", String.valueOf(queueInfo.get("queueName")));
+                    }
+                    extCalldataBuilder.addElement("additionaldata", gson.toJson(jsonObject));
+                } else {
+
+                    extCalldataBuilder.addElement("additionaldata", additionaldata);
+                }
             }
 
             if (isAppToApp) {
                 extCalldataBuilder.addElement("apptoapp", "1");
+            }
+            if (isRob) {
+                extCalldataBuilder.addElement("rob", "1");
             }
             StandardExtensionElement extCalldata = extCalldataBuilder.build();
             message.addExtension(extContentType);
@@ -297,7 +471,7 @@ public class SipProxy {
                                  String status,
                                  Message message) {
 
-//        callService.pushRedisNotify(calleeUsername, session, status, message);
+        callService.pushRedisNotify(calleeUsername, session, status, message);
     }
 
     private void logRecvSipEvents(final SipMessage msg) {

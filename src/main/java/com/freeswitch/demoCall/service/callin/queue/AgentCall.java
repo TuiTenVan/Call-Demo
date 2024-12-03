@@ -1,4 +1,4 @@
-package com.freeswitch.demoCall.service.outbound.queue;
+package com.freeswitch.demoCall.service.callin.queue;
 
 import lombok.AllArgsConstructor;
 import lombok.Builder;

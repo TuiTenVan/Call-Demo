@@ -12,7 +12,7 @@ public class MyWebSocketHandler extends TextWebSocketHandler {
 
     public MyWebSocketHandler() {
         try {
-            sipClient = new SipClient("192.168.1.183", 5070);
+            sipClient = new SipClient("192.168.1.70", 5070);
             sipClient.init();
         } catch (Exception e) {
             e.printStackTrace();
