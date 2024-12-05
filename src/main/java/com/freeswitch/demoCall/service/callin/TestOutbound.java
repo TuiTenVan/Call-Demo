@@ -58,7 +58,7 @@ public class TestOutbound {
                     if (EventSocketAPI.runCommand(ctx, "set", "call_timeout=10", true)) {
                         logger.info(PREFIX_LOG_CALLIN + "call_timeout=10");
                     }
-                    String linkAudio = Utils.getLink("/version-huyen/cms-sdk-upload/ivrFile/2024/10/18/1jfxnkuwjwidduehl4p186ont79dirfq.wav", true);
+//                    String linkAudio = Utils.getLink("/version-huyen/cms-sdk-upload/ivrFile/2024/10/18/1jfxnkuwjwidduehl4p186ont79dirfq.wav", true);
                     if (EventSocketAPI.runCommand(ctx, "export", "ringback=/etc/freeswitch/call-record/sounds/ringtone_8000_mono.wav", true)) {
                         logger.info(PREFIX_LOG_CALLIN + "ringback");
                     }
